@@ -30,6 +30,14 @@ import {
   InvocationResult,
 } from "./sorobanContractClient.js";
 import { toContractLeagueId } from "./contractLeagueId.js";
+export {
+  DepositVerificationService,
+  DepositVerificationErrorCode,
+  type VerifyDepositParams,
+  type VerificationSuccess,
+  type VerificationFailure,
+  type DepositVerificationResult,
+} from "./depositVerificationService.js";
 
 export interface VerifyPaymentParams {
   txHash: string;

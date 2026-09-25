@@ -46,6 +46,8 @@ export default function TeamPage() {
     squadName, setSquadName, 
     players, setPlayers, 
     selectedPlayerId, setSelectedPlayerId,
+    activeDragPlayer, setActiveDragPlayer,
+    substitutionFeedback, setSubstitutionFeedback,
     activeModalState, setActiveModalState,
     handleSwap, handleSetCaptain, handleSetViceCaptain
   } = useTeamStore();
@@ -188,8 +190,6 @@ export default function TeamPage() {
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
 
   // DND Handlers
-  const [activeDragPlayer, setActiveDragPlayer] = useState<LocalSquadPlayer | null>(null);
-
   const sensors = useSensors(
     useSensor(MouseSensor, {
       activationConstraint: {
@@ -206,9 +206,10 @@ export default function TeamPage() {
 
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
-    const player = players.find((p) => p.playerId === active.id);
+    const player = players.find((p) => String(p.playerId) === String(active.id));
     if (player) {
       setActiveDragPlayer(player);
+      setSubstitutionFeedback(null);
     }
   };
 
@@ -655,6 +656,32 @@ export default function TeamPage() {
           <div data-testid="save-error" className="p-3.5 rounded-lg bg-rose-950/40 border border-rose-500/40 flex items-center gap-3 text-rose-300 text-xs animate-shake">
             <IconAlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
             <span className="font-semibold">{errorMessage}</span>
+          </div>
+        )}
+
+        {substitutionFeedback && (
+          <div
+            className={`p-3.5 rounded-lg flex items-center justify-between gap-3 text-xs animate-fadeIn ${
+              substitutionFeedback.type === "success"
+                ? "bg-emerald-950/50 border border-emerald-500/50 text-emerald-300"
+                : "bg-rose-950/50 border border-rose-500/50 text-rose-300"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {substitutionFeedback.type === "success" ? (
+                <IconCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+              ) : (
+                <IconAlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
+              )}
+              <span className="font-semibold">{substitutionFeedback.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSubstitutionFeedback(null)}
+              className="text-[10px] text-slate-400 hover:text-white uppercase font-mono px-1.5 py-0.5 rounded hover:bg-white/10"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 
