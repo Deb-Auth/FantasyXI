@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
-import { webhookDispatcher, WebhookEndpoint } from "./webhookDispatcher.js";
+import { webhookDispatcher, WebhookEndpoint } from "../services/webhooks/webhookDispatcher.js";
 
 // In-memory endpoints registry (backed by DB when available)
 const registeredEndpoints: Map<string, WebhookEndpoint> = new Map();
@@ -74,7 +74,7 @@ export async function listEndpoints(req: Request, res: Response): Promise<void> 
 }
 
 export async function testDispatch(req: Request, res: Response): Promise<void> {
-  const { id } = req.params;
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const endpoint = registeredEndpoints.get(id);
 
   if (!endpoint) {
@@ -93,7 +93,7 @@ export async function testDispatch(req: Request, res: Response): Promise<void> {
 }
 
 export async function listDeliveries(req: Request, res: Response): Promise<void> {
-  const { id } = req.params;
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const deliveries = webhookDispatcher.listDeliveries(id);
   res.json({ success: true, deliveries });
 }
