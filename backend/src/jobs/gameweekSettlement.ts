@@ -1,10 +1,7 @@
 import { prisma } from "../config/db.js";
-import { ChipType, LeagueStatus, MembershipStatus, ScoringType } from "../types/index.js";
+import { LeagueStatus, MembershipStatus, ScoringType } from "../types/index.js";
 import { fplSyncService } from "../services/fpl/fplSyncService.js";
-import { scoringService } from "../services/scoring/scoringService.js";
-import { squadService } from "../services/squad/squadService.js";
 import { leagueService, LeagueService } from "../services/league/leagueService.js";
-import { fplSyncService } from "../services/fpl/fplSyncService.js";
 import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
 // Imported for its side effect: subscribes the scoring, free-hit and league
@@ -83,6 +80,13 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
   await publishOrThrow(eventBus, GAMEWEEK_UPDATED_EVENT, {
     gameweekId,
     gameweekFplId: gameweek.fplId,
+  });
+  const leagues = await prisma.league.findMany({
+    where: {
+      status: LeagueStatus.ACTIVE,
+      startGameweekId: { lte: gameweekId },
+      endGameweekId: { gte: gameweekId },
+    },
   });
   for (const league of leagues) {
     if (league.scoringType === ScoringType.HEAD_TO_HEAD) {
