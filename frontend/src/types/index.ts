@@ -61,6 +61,12 @@ export interface User {
   email: string;
   username: string;
   name?: string | null;
+  role?: "USER" | "MODERATOR" | "ADMIN";
+  /** Sign-in methods linked to the account; the same user whichever one is used */
+  authProviders?: {
+    password: boolean;
+    google: boolean;
+  };
   createdAt: string;
   updatedAt?: string;
 }
@@ -267,6 +273,31 @@ export interface LeagueStandingsEntry {
     points: number;
   }>;
   joinedAt: string;
+}
+
+// ============================================================
+// Global Leaderboard (GET /api/v1/leaderboard)
+// ============================================================
+
+export type LeaderboardMode = "overall" | "gameweek";
+
+export interface LeaderboardEntry {
+  /** Competition rank: equal points share a rank (1, 2, 2, 4) */
+  rank: number;
+  squadId: string;
+  squadName: string;
+  userId: string;
+  username: string;
+  points: number;
+  isCurrentUser: boolean;
+}
+
+export interface LeaderboardData {
+  mode: LeaderboardMode;
+  gameweek: { id: number; name: string } | null;
+  entries: LeaderboardEntry[];
+  /** The signed-in viewer's best squad and the unfiltered page it appears on */
+  viewer: { rank: number; page: number; squadId: string; points: number } | null;
 }
 
 // ============================================================
