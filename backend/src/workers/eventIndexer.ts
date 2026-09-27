@@ -280,6 +280,7 @@ export class EscrowEventIndexer {
           } catch (err) {
             console.error("[indexer] Failed to send deposit email:", err);
           }
+        }
         // Replayed events re-apply the same state; only audit the first confirmation
         if (!wasConfirmed) {
           this.audit.record({

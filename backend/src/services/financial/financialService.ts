@@ -115,19 +115,28 @@ export class FinancialConflictError extends Error {
 
 export class FinancialService {
   private readonly deadLetters: PayoutDeadLetterService;
+  private readonly email: EmailService;
 
   constructor(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private readonly db: any = prisma,
     private readonly stellar: StellarService = stellarService,
-    private readonly email: EmailService = emailService
-  ) {}
-    deadLetters?: PayoutDeadLetterService,
+    emailOrDeadLetters?: EmailService | PayoutDeadLetterService,
     private readonly audit: FinancialAuditRecorder = financialAuditLog
   ) {
+    // Email notifications were introduced while the dead-letter queue was
+    // being merged. Accept either third argument to preserve both call sites.
+    this.email =
+      emailOrDeadLetters instanceof PayoutDeadLetterService
+        ? emailService
+        : emailOrDeadLetters ?? emailService;
     // Share the injected DB so the DLQ and the ledger always see the same state
     this.deadLetters =
-      deadLetters ?? (db === prisma ? payoutDeadLetterService : new PayoutDeadLetterService(db, audit));
+      emailOrDeadLetters instanceof PayoutDeadLetterService
+        ? emailOrDeadLetters
+        : db === prisma
+          ? payoutDeadLetterService
+          : new PayoutDeadLetterService(db, audit);
   }
 
   /**
