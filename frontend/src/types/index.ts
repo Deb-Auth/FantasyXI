@@ -296,6 +296,30 @@ export interface ChatEntry extends ChatMessage {
 
 export type ChatConnectionState = "connecting" | "open" | "reconnecting" | "unavailable";
 
+// Global Leaderboard (GET /api/v1/leaderboard)
+// ============================================================
+
+export type LeaderboardMode = "overall" | "gameweek";
+
+export interface LeaderboardEntry {
+  /** Competition rank: equal points share a rank (1, 2, 2, 4) */
+  rank: number;
+  squadId: string;
+  squadName: string;
+  userId: string;
+  username: string;
+  points: number;
+  isCurrentUser: boolean;
+}
+
+export interface LeaderboardData {
+  mode: LeaderboardMode;
+  gameweek: { id: number; name: string } | null;
+  entries: LeaderboardEntry[];
+  /** The signed-in viewer's best squad and the unfiltered page it appears on */
+  viewer: { rank: number; page: number; squadId: string; points: number } | null;
+}
+
 // ============================================================
 // Live Matchday Feed (GET /api/v1/leagues/:id/live, Server-Sent Events)
 // ============================================================
