@@ -19,12 +19,6 @@ dotenv.config();
 
 const apolloServer = new ApolloServer({ typeDefs, resolvers });
 
-app.get("/api/health/queues", async (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    const health = await getQueueHealth();
-    res.status(health.running ? 200 : 503).json({
-      success: health.running,
-      data: health,
 // Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
 app.set("trust proxy", 1);
 

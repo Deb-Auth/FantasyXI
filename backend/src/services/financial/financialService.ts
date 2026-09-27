@@ -115,19 +115,28 @@ export class FinancialConflictError extends Error {
 
 export class FinancialService {
   private readonly deadLetters: PayoutDeadLetterService;
+  private readonly email: EmailService;
+  private readonly audit: FinancialAuditRecorder;
 
   constructor(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private readonly db: any = prisma,
     private readonly stellar: StellarService = stellarService,
-    private readonly email: EmailService = emailService
-  ) {}
-    deadLetters?: PayoutDeadLetterService,
-    private readonly audit: FinancialAuditRecorder = financialAuditLog
+    emailOrDeadLetters?: EmailService | PayoutDeadLetterService,
+    audit: FinancialAuditRecorder = financialAuditLog
   ) {
+    const hasDeadLetterMethods =
+      emailOrDeadLetters && "getAutoRetryable" in emailOrDeadLetters;
+
+    this.email = hasDeadLetterMethods
+      ? emailService
+      : (emailOrDeadLetters as EmailService | undefined) ?? emailService;
+    this.audit = audit;
+
     // Share the injected DB so the DLQ and the ledger always see the same state
     this.deadLetters =
-      deadLetters ?? (db === prisma ? payoutDeadLetterService : new PayoutDeadLetterService(db, audit));
+      (hasDeadLetterMethods ? emailOrDeadLetters : undefined) ??
+      (db === prisma ? payoutDeadLetterService : new PayoutDeadLetterService(db, audit));
   }
 
   /**
