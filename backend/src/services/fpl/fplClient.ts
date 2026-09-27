@@ -344,6 +344,14 @@ export class FplClient {
         bonus: number;
         total_points: number;
       };
+      explain: Array<{
+        fixture: number;
+        stats: Array<{
+          identifier: string;
+          points: number;
+          value: number;
+        }>;
+      }>;
     }>;
   }> {
     return this.get(`/event/${gameweekId}/live/`, FPL_CACHE_TTL.GAMEWEEK_LIVE_SECONDS);
