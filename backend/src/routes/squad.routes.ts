@@ -7,6 +7,7 @@ import {
   getUserSquads,
   calculateGameweekScore,
   activateChip,
+  getSquadValuation,
 } from "../controllers/squad.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -27,6 +28,9 @@ router.get("/me", requireAuth, authenticatedRateLimiter, getMySquads);
 
 // GET /api/v1/squads/:id (Public: view any squad)
 router.get("/:id", getSquadById);
+
+// GET /api/v1/squads/:id/value (Public: bank, squad and total team value using live FPL prices)
+router.get("/:id/value", getSquadValuation);
 
 // PUT /api/v1/squads/:id (Protected: update user's own squad)
 router.put("/:id", requireAuth, requirePermission(Permission.SQUAD_UPDATE_OWN), updateSquad);
