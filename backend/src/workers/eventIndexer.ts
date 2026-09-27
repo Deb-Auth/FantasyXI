@@ -22,6 +22,12 @@ import { StellarService, stellarService } from "../services/financial/stellarSer
 import { leagueIdPrefixFromContractId } from "../services/financial/contractLeagueId.js";
 import { EmailService, emailService } from "../services/email/emailService.js";
 import {
+  FinancialAuditAction,
+  FinancialAuditRecorder,
+  financialAuditLog,
+  SYSTEM_ACTOR,
+} from "../services/audit/financialAuditLog.js";
+import {
   MembershipStatus,
   PaymentStatus,
   TransactionStatus,
@@ -35,6 +41,7 @@ export interface EventIndexerOptions {
   db?: any;
   stellar?: StellarService;
   email?: EmailService;
+  audit?: FinancialAuditRecorder;
   pollIntervalMs?: number;
   baseBackoffMs?: number;
   maxBackoffMs?: number;
@@ -48,6 +55,7 @@ export class EscrowEventIndexer {
   private readonly db: any;
   private readonly stellar: StellarService;
   private readonly email: EmailService;
+  private readonly audit: FinancialAuditRecorder;
   private readonly pollIntervalMs: number;
   private readonly baseBackoffMs: number;
   private readonly maxBackoffMs: number;
@@ -61,6 +69,7 @@ export class EscrowEventIndexer {
     this.db = options.db ?? prisma;
     this.stellar = options.stellar ?? stellarService;
     this.email = options.email ?? emailService;
+    this.audit = options.audit ?? financialAuditLog;
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
     this.baseBackoffMs = options.baseBackoffMs ?? 1_000;
     this.maxBackoffMs = options.maxBackoffMs ?? 60_000;
@@ -221,6 +230,7 @@ export class EscrowEventIndexer {
         ) {
           return false;
         }
+        const wasConfirmed = member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED;
 
         const isAlreadyConfirmed = member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED;
 
@@ -270,6 +280,18 @@ export class EscrowEventIndexer {
           } catch (err) {
             console.error("[indexer] Failed to send deposit email:", err);
           }
+        // Replayed events re-apply the same state; only audit the first confirmation
+        if (!wasConfirmed) {
+          this.audit.record({
+            action: FinancialAuditAction.DEPOSIT_CONFIRMED,
+            userId: member.userId,
+            actorId: SYSTEM_ACTOR,
+            leagueId: league.id,
+            amount: Number(amountStroops) / 10_000_000,
+            asset: stellarConfig.usdcAssetCode,
+            stellarTxHash: event.txHash,
+            metadata: { memberId: member.id, participant, ledgerSeq: event.ledger, source: "indexer" },
+          });
         }
 
         console.log(
@@ -289,6 +311,7 @@ export class EscrowEventIndexer {
           return false;
         }
 
+        const wasCompleted = league.status === "COMPLETED";
         const updates: Promise<unknown>[] = [
           this.db.league.update({
             where: { id: league.id },
@@ -322,6 +345,24 @@ export class EscrowEventIndexer {
         }
 
         await this.db.$transaction(updates);
+
+        // Replayed settle events re-apply the same state; only audit the first one
+        if (platformFeeStroops > 0n && !wasCompleted) {
+          this.audit.record({
+            action: FinancialAuditAction.FEE_EXTRACTION,
+            actorId: SYSTEM_ACTOR,
+            leagueId: league.id,
+            amount: Number(platformFeeStroops) / 10_000_000,
+            asset: stellarConfig.usdcAssetCode,
+            stellarTxHash: `${event.txHash}-fee`,
+            metadata: {
+              totalPayoutStroops: totalPayoutStroops.toString(),
+              platformFeeStroops: platformFeeStroops.toString(),
+              ledgerSeq: event.ledger,
+              source: "indexer",
+            },
+          });
+        }
         return true;
       }
 
@@ -384,6 +425,19 @@ export class EscrowEventIndexer {
         }
 
         await this.db.$transaction(txOps);
+
+        for (const m of membersToRefund) {
+          this.audit.record({
+            action: FinancialAuditAction.REFUND,
+            userId: m.userId,
+            actorId: SYSTEM_ACTOR,
+            leagueId: league.id,
+            amount: Number(league.entryFee ?? 0),
+            asset: stellarConfig.usdcAssetCode,
+            stellarTxHash: `${event.txHash}-${m.id}`,
+            metadata: { memberId: m.id, ledgerSeq: event.ledger, source: "indexer" },
+          });
+        }
         return true;
       }
 
@@ -428,6 +482,23 @@ export class EscrowEventIndexer {
               ledgerSeq: event.ledger,
               status: TransactionStatus.CONFIRMED,
               confirmedAt,
+            },
+          });
+
+          this.audit.record({
+            action: FinancialAuditAction.WITHDRAWAL,
+            userId: member.userId,
+            actorId: SYSTEM_ACTOR,
+            leagueId: league.id,
+            amount: Number(amountStroops) / 10_000_000,
+            asset: stellarConfig.usdcAssetCode,
+            stellarTxHash: `${event.txHash}-${winner}`,
+            metadata: {
+              memberId: member.id,
+              winner,
+              type: TransactionType.PRIZE_PAYOUT,
+              ledgerSeq: event.ledger,
+              source: "indexer",
             },
           });
         }

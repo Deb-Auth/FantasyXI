@@ -24,6 +24,9 @@ import {
   UserRole,
 } from "@prisma/client";
 
+export { Role, Permission } from "../config/permissions.js";
+import type { Role } from "../config/permissions.js";
+
 export {
   Position,
   LeagueStatus,
@@ -86,7 +89,8 @@ export interface AuthUser {
   email: string;
   username: string;
   name?: string | null;
-  role: UserRole;
+  /** USER / MODERATOR / ADMIN for accounts, SERVICE for API-key callers */
+  role: Role;
 }
 
 /** Safe user representation returned across public and auth endpoints */
@@ -96,6 +100,11 @@ export interface SafeUser {
   username: string;
   name?: string | null;
   role: UserRole;
+  /** Sign-in methods available to the account (email/password and/or Google) */
+  authProviders: {
+    password: boolean;
+    google: boolean;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -220,6 +229,31 @@ export interface CreateLeagueInput {
   endGameweekId: number;
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
+  isPrivate?: boolean; // default false: private leagues are invitation-only
+}
+
+export type LeagueSortField = "newest" | "entryFee" | "size" | "prizePool" | "members";
+
+/** League discovery filters (GET /leagues query string) */
+export interface LeagueSearchFilters {
+  /** Case-insensitive substring match on the league name */
+  q?: string;
+  /** Exact invite code (public leagues, or private ones the viewer already belongs to) */
+  code?: string;
+  status?: LeagueStatus;
+  scoringType?: ScoringType;
+  creatorId?: string;
+  minEntryFee?: number;
+  maxEntryFee?: number;
+  /** League capacity (maxMembers) bounds */
+  minSize?: number;
+  maxSize?: number;
+  /** Only leagues with at least one free spot */
+  hasOpenSlots?: boolean;
+  sortBy?: LeagueSortField;
+  sortOrder?: "asc" | "desc";
+  page?: number;
+  pageSize?: number;
 }
 
 export interface JoinLeagueInput {

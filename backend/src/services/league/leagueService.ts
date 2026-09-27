@@ -8,6 +8,8 @@ import {
   CreateLeagueInput,
   LeagueStandingsEntry,
   H2HStandingsEntry,
+  LeagueSearchFilters,
+  LeagueSortField,
 } from "../../types/index.js";
 import { PrizeService } from "./prizeService.js";
 import { ScoringService } from "../scoring/scoringService.js";
@@ -18,6 +20,8 @@ export interface H2HPairing {
   homeMemberId: string;
   awayMemberId: string | null;
 }
+
+export const MAX_LEAGUE_MEMBERS = 100_000;
 
 export class LeagueValidationError extends Error {
   constructor(message: string) {
@@ -38,6 +42,35 @@ export class LeagueForbiddenError extends Error {
     super(message);
     this.name = "LeagueForbiddenError";
   }
+}
+
+/** Raised for invitation links that are unknown, expired, revoked or already used. */
+export class LeagueInvitationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LeagueInvitationError";
+  }
+}
+
+/** Default and maximum lifetime of a private league invitation link. */
+export const INVITATION_DEFAULT_TTL_HOURS = 72;
+export const INVITATION_MAX_TTL_HOURS = 24 * 30;
+
+export const LEAGUE_SEARCH_MAX_PAGE_SIZE = 50;
+const LEAGUE_SEARCH_DEFAULT_PAGE_SIZE = 20;
+const LEAGUE_SORT_FIELDS: Record<LeagueSortField, string> = {
+  newest: "createdAt",
+  entryFee: "entryFee",
+  size: "maxMembers",
+  prizePool: "prizePool",
+  members: "currentMembers",
+};
+
+export interface LeagueSearchResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
 export class LeagueService {
@@ -70,11 +103,17 @@ export class LeagueService {
       throw new LeagueValidationError(`Invalid scoring type: ${scoringType}`);
     }
 
+    if (input.isPrivate !== undefined && typeof input.isPrivate !== "boolean") {
+      throw new LeagueValidationError("isPrivate must be a boolean");
+    }
+
     const maxMembers = input.maxMembers ?? 20;
     const minMembers = input.minMembers ?? 2;
 
-    if (maxMembers < 2 || maxMembers > 100) {
-      throw new LeagueValidationError("Maximum participants must be between 2 and 100");
+    if (maxMembers < 2 || maxMembers > MAX_LEAGUE_MEMBERS) {
+      throw new LeagueValidationError(
+        `Maximum participants must be between 2 and ${MAX_LEAGUE_MEMBERS}`
+      );
     }
     if (minMembers < 2 || minMembers > maxMembers) {
       throw new LeagueValidationError(
@@ -150,6 +189,7 @@ export class LeagueService {
           prizePool: prizeCalc.prizePool,
           status: LeagueStatus.UPCOMING,
           scoringType,
+          isPrivate: input.isPrivate ?? false,
           startGameweekId: startGw.id,
           endGameweekId: endGw.id,
         },
@@ -185,15 +225,39 @@ export class LeagueService {
 
   /**
    * Joins an upcoming league with a valid fantasy squad.
+   *
+   * Private leagues require a valid invitation token. The invitation is consumed in
+   * the same transaction that creates the membership, so a link can never admit
+   * more than one user, even under concurrent requests.
    */
-  public async joinLeague(leagueId: string, userId: string, squadId: string) {
-    const league = await prisma.league.findUnique({
+  public async joinLeague(
+    leagueId: string,
+    userId: string,
+    squadId: string,
+    options: { invitationToken?: string } = {}
+  ) {
+    const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: { startGameweek: true },
     });
 
     if (!league) {
       throw new LeagueNotFoundError(leagueId);
+    }
+
+    // 0. Private leagues are invitation-only
+    let invitationId: string | null = null;
+    if (league.isPrivate) {
+      if (!options.invitationToken) {
+        throw new LeagueForbiddenError(
+          "This league is private. A valid invitation link is required to join."
+        );
+      }
+      const invitation = await this.findUsableInvitation(options.invitationToken);
+      if (invitation.leagueId !== league.id) {
+        throw new LeagueInvitationError("This invitation is not valid for this league");
+      }
+      invitationId = invitation.id;
     }
 
     // 1. Must be in UPCOMING state
@@ -218,7 +282,7 @@ export class LeagueService {
     }
 
     // 4. Duplicate membership check
-    const existingMember = await prisma.leagueMember.findUnique({
+    const existingMember = await this.db.leagueMember.findUnique({
       where: {
         leagueId_userId: {
           leagueId,
@@ -231,7 +295,7 @@ export class LeagueService {
     }
 
     // 5. Squad validation
-    const squad = await prisma.squad.findFirst({
+    const squad = await this.db.squad.findFirst({
       where: { id: squadId, userId },
     });
     if (!squad) {
@@ -246,7 +310,24 @@ export class LeagueService {
       Number(league.entryFee)
     );
 
-    return prisma.$transaction(async (tx) => {
+    return this.db.$transaction(async (tx: any) => {
+      if (invitationId) {
+        // Conditional update = atomic single-use check; loses the race if already consumed
+        const now = new Date();
+        const consumed = await tx.leagueInvitation.updateMany({
+          where: {
+            id: invitationId,
+            usedAt: null,
+            revokedAt: null,
+            expiresAt: { gt: now },
+          },
+          data: { usedAt: now, usedById: userId },
+        });
+        if (consumed.count !== 1) {
+          throw new LeagueInvitationError("This invitation link has already been used or has expired");
+        }
+      }
+
       const member = await tx.leagueMember.create({
         data: {
           leagueId,
@@ -271,6 +352,191 @@ export class LeagueService {
 
       return member;
     });
+  }
+
+  // ============================================================
+  // Private league invitations
+  // ============================================================
+
+  /** SHA-256 of a raw invitation token; only the hash is ever persisted. */
+  public static hashInvitationToken(token: string): string {
+    return crypto.createHash("sha256").update(token).digest("hex");
+  }
+
+  /** 256-bit URL-safe random token. */
+  public static generateInvitationToken(): string {
+    return crypto.randomBytes(32).toString("base64url");
+  }
+
+  /**
+   * Creates a single-use invitation link for a private league. Creator only.
+   * The raw token is returned exactly once and cannot be recovered later.
+   */
+  public async createInvitation(
+    leagueId: string,
+    requesterUserId: string,
+    expiresInHours: number = INVITATION_DEFAULT_TTL_HOURS
+  ) {
+    if (
+      !Number.isFinite(expiresInHours) ||
+      expiresInHours < 1 ||
+      expiresInHours > INVITATION_MAX_TTL_HOURS
+    ) {
+      throw new LeagueValidationError(
+        `expiresInHours must be between 1 and ${INVITATION_MAX_TTL_HOURS}`
+      );
+    }
+
+    const league = await this.requireOwnedLeague(leagueId, requesterUserId);
+    if (!league.isPrivate) {
+      throw new LeagueValidationError(
+        "Invitation links are only available for private leagues. Public leagues can be joined directly."
+      );
+    }
+    if (league.status !== LeagueStatus.UPCOMING) {
+      throw new LeagueValidationError(
+        `Cannot invite members to a league in '${league.status}' status`
+      );
+    }
+
+    const token = LeagueService.generateInvitationToken();
+    const invitation = await this.db.leagueInvitation.create({
+      data: {
+        leagueId,
+        tokenHash: LeagueService.hashInvitationToken(token),
+        createdById: requesterUserId,
+        expiresAt: new Date(Date.now() + Math.round(expiresInHours * 3_600_000)),
+      },
+    });
+
+    return {
+      id: invitation.id,
+      leagueId,
+      token,
+      expiresAt: invitation.expiresAt,
+      createdAt: invitation.createdAt,
+    };
+  }
+
+  /**
+   * Lists a private league's invitations (never the tokens). Creator only.
+   */
+  public async listInvitations(leagueId: string, requesterUserId: string) {
+    await this.requireOwnedLeague(leagueId, requesterUserId);
+    const invitations = await this.db.leagueInvitation.findMany({
+      where: { leagueId },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        expiresAt: true,
+        usedAt: true,
+        revokedAt: true,
+        createdAt: true,
+        usedBy: { select: { id: true, username: true } },
+      },
+    });
+
+    const now = Date.now();
+    return invitations.map((inv: any) => ({
+      ...inv,
+      state: LeagueService.invitationState(inv, now),
+    }));
+  }
+
+  /**
+   * Revokes an unused invitation. Creator only.
+   */
+  public async revokeInvitation(leagueId: string, invitationId: string, requesterUserId: string) {
+    await this.requireOwnedLeague(leagueId, requesterUserId);
+    const revoked = await this.db.leagueInvitation.updateMany({
+      where: { id: invitationId, leagueId, usedAt: null, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    if (revoked.count !== 1) {
+      throw new LeagueInvitationError("Invitation not found, already used or already revoked");
+    }
+  }
+
+  /**
+   * Public preview of the league behind an invitation link, so the invitee can
+   * see what they are joining before picking a squad.
+   */
+  public async previewInvitation(token: string) {
+    const invitation = await this.findUsableInvitation(token);
+    const league = await this.db.league.findUnique({
+      where: { id: invitation.leagueId },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        entryFee: true,
+        prizePool: true,
+        maxMembers: true,
+        currentMembers: true,
+        status: true,
+        scoringType: true,
+        creator: { select: { id: true, username: true } },
+        startGameweek: { select: { id: true, name: true, deadline: true } },
+        endGameweek: { select: { id: true, name: true } },
+      },
+    });
+    if (!league) {
+      throw new LeagueInvitationError("This invitation link is invalid");
+    }
+    return { league, expiresAt: invitation.expiresAt };
+  }
+
+  /**
+   * Redeems an invitation link: joins its league and consumes the invitation.
+   */
+  public async acceptInvitation(token: string, userId: string, squadId: string) {
+    const invitation = await this.findUsableInvitation(token);
+    return this.joinLeague(invitation.leagueId, userId, squadId, { invitationToken: token });
+  }
+
+  private static invitationState(
+    inv: { usedAt: Date | null; revokedAt: Date | null; expiresAt: Date },
+    now: number = Date.now()
+  ): "ACTIVE" | "USED" | "REVOKED" | "EXPIRED" {
+    if (inv.usedAt) return "USED";
+    if (inv.revokedAt) return "REVOKED";
+    if (new Date(inv.expiresAt).getTime() <= now) return "EXPIRED";
+    return "ACTIVE";
+  }
+
+  private async findUsableInvitation(token: string) {
+    if (typeof token !== "string" || token.length < 16 || token.length > 128) {
+      throw new LeagueInvitationError("This invitation link is invalid");
+    }
+
+    const invitation = await this.db.leagueInvitation.findUnique({
+      where: { tokenHash: LeagueService.hashInvitationToken(token) },
+    });
+    if (!invitation) {
+      throw new LeagueInvitationError("This invitation link is invalid");
+    }
+
+    switch (LeagueService.invitationState(invitation)) {
+      case "USED":
+        throw new LeagueInvitationError("This invitation link has already been used");
+      case "REVOKED":
+        throw new LeagueInvitationError("This invitation link has been revoked");
+      case "EXPIRED":
+        throw new LeagueInvitationError("This invitation link has expired");
+      default:
+        return invitation;
+    }
+  }
+
+  private async requireOwnedLeague(leagueId: string, requesterUserId: string) {
+    const league = await this.db.league.findUnique({ where: { id: leagueId } });
+    if (!league) {
+      throw new LeagueNotFoundError(leagueId);
+    }
+    if (league.creatorId !== requesterUserId) {
+      throw new LeagueForbiddenError("Only the league creator can manage invitations");
+    }
+    return league;
   }
 
   /**
@@ -409,6 +675,85 @@ export class LeagueService {
       standings,
       prizeDistribution,
     };
+  }
+
+  /**
+   * Recalculates every CLASSIC league member's cumulative points and rank in
+   * a fixed, small number of queries regardless of how many leagues or
+   * members exist on the platform.
+   *
+   * Previously, computing standings for every classic league at the end of a
+   * gameweek meant looping over each league and querying/updating its members
+   * individually — an N+1 access pattern that gets slower, not just linearly
+   * but per-round-trip, as the number of leagues and members grows (the
+   * scenario in issue #140: 10,000+ users across 1,000+ leagues). This version
+   * does the whole platform in four queries total:
+   *   1. One aggregation (`groupBy`) for every squad's cumulative points.
+   *   2. One `findMany` for every active classic-league member.
+   *   3. Ranking happens in memory, grouped by league (no DB round trips).
+   *   4. One bulk `UPDATE ... FROM UNNEST(...)` writes every member's new
+   *      total_points/rank in a single round trip instead of one UPDATE per
+   *      member.
+   */
+  public async recalculateClassicStandings(
+    gameweekId: number
+  ): Promise<{ membersUpdated: number }> {
+    const totals = await this.db.squadGameweekScore.groupBy({
+      by: ["squadId"],
+      where: { gameweekId: { lte: gameweekId } },
+      _sum: { points: true },
+    });
+    const totalBySquad = new Map<string, number>(
+      totals.map((t: any) => [t.squadId, t._sum.points ?? 0])
+    );
+
+    const members = await this.db.leagueMember.findMany({
+      where: {
+        status: MembershipStatus.ACTIVE,
+        league: { scoringType: ScoringType.CLASSIC, status: LeagueStatus.ACTIVE },
+      },
+      select: { id: true, leagueId: true, squadId: true, joinedAt: true },
+    });
+
+    if (members.length === 0) {
+      return { membersUpdated: 0 };
+    }
+
+    const byLeague = new Map<string, typeof members>();
+    for (const member of members) {
+      const list = byLeague.get(member.leagueId) ?? [];
+      list.push(member);
+      byLeague.set(member.leagueId, list);
+    }
+
+    const ids: string[] = [];
+    const totalPoints: number[] = [];
+    const ranks: number[] = [];
+
+    for (const leagueMembers of byLeague.values()) {
+      const sorted = [...leagueMembers].sort((a: any, b: any) => {
+        const diff =
+          (totalBySquad.get(b.squadId) ?? 0) - (totalBySquad.get(a.squadId) ?? 0);
+        return diff !== 0 ? diff : a.joinedAt.getTime() - b.joinedAt.getTime();
+      });
+      sorted.forEach((member: any, idx: number) => {
+        ids.push(member.id);
+        totalPoints.push(totalBySquad.get(member.squadId) ?? 0);
+        ranks.push(idx + 1);
+      });
+    }
+
+    await this.db.$executeRaw`
+      UPDATE league_members AS lm
+      SET total_points = data.total_points, rank = data.rank
+      FROM (
+        SELECT * FROM UNNEST(${ids}::text[], ${totalPoints}::int[], ${ranks}::int[])
+          AS t(id, total_points, rank)
+      ) AS data
+      WHERE lm.id = data.id
+    `;
+
+    return { membersUpdated: ids.length };
   }
 
   /**
@@ -710,6 +1055,162 @@ export class LeagueService {
   }
 
   /**
+   * Largest single-elimination bracket (a power of two, capped at 8) that fits
+   * within the given number of qualified members. Returns 0 if fewer than 2
+   * members are available, since no bracket can be formed.
+   */
+  public static computeBracketSize(memberCount: number): number {
+    let size = 8;
+    while (size > memberCount) {
+      size = size / 2;
+    }
+    return size >= 2 ? size : 0;
+  }
+
+  /**
+   * Seeds a knockout round from an ordered list of members (best first):
+   * seed 1 plays the lowest seed, seed 2 the second-lowest, and so on. This
+   * keeps the top seeds apart for as long as possible, standard bracket style.
+   */
+  public static seedPlayoffPairings(
+    orderedMemberIds: string[]
+  ): Array<{ homeMemberId: string; awayMemberId: string }> {
+    const n = orderedMemberIds.length;
+    const pairings: Array<{ homeMemberId: string; awayMemberId: string }> = [];
+    for (let i = 0; i < n / 2; i++) {
+      pairings.push({
+        homeMemberId: orderedMemberIds[i],
+        awayMemberId: orderedMemberIds[n - 1 - i],
+      });
+    }
+    return pairings;
+  }
+
+  /**
+   * Generates the first round of an end-of-season H2H playoff bracket from the
+   * current regular-season standings. Qualifies the top 2/4/8 members (whichever
+   * is the largest power of two the league can fill) and schedules their round-1
+   * fixtures on the first of the league's final `log2(bracketSize)` gameweeks —
+   * e.g. a 4-team bracket plays its semi-final on the second-to-last gameweek
+   * and its final on the last.
+   *
+   * Any not-yet-finished regular-season fixture already scheduled for that
+   * gameweek is replaced: once the bracket is set, only the knockout fixtures
+   * should decide who plays whom.
+   */
+  public async generatePlayoffBracket(leagueId: string): Promise<{
+    gameweekId: number;
+    round: number;
+    bracketSize: number;
+    pairings: Array<{ homeMemberId: string; awayMemberId: string }>;
+  }> {
+    const league = await this.db.league.findUnique({ where: { id: leagueId } });
+    if (!league) {
+      throw new LeagueNotFoundError(leagueId);
+    }
+    if (league.scoringType !== ScoringType.HEAD_TO_HEAD) {
+      throw new LeagueValidationError("League does not use head-to-head scoring");
+    }
+
+    const standings = await this.getH2HStandings(leagueId);
+    const bracketSize = LeagueService.computeBracketSize(standings.length);
+    if (bracketSize < 2) {
+      throw new LeagueValidationError(
+        "At least 2 active members are required to generate a playoff bracket"
+      );
+    }
+
+    const rounds = Math.log2(bracketSize);
+    const gameweekId = league.endGameweekId - rounds + 1;
+    const seeds = standings.slice(0, bracketSize).map((s) => s.memberId);
+    const pairings = LeagueService.seedPlayoffPairings(seeds);
+
+    await this.db.$transaction(async (tx: any) => {
+      await tx.leagueFixture.deleteMany({
+        where: { leagueId, gameweekId, isFinished: false },
+      });
+      await tx.leagueFixture.createMany({
+        data: pairings.map((p, slot) => ({
+          leagueId,
+          gameweekId,
+          homeMemberId: p.homeMemberId,
+          awayMemberId: p.awayMemberId,
+          isPlayoff: true,
+          playoffRound: 1,
+          playoffSlot: slot,
+        })),
+      });
+    });
+
+    return { gameweekId, round: 1, bracketSize, pairings };
+  }
+
+  /**
+   * Advances the bracket once every fixture of a completed playoff round has
+   * been settled (via `settleH2HGameweek`). Winners of adjacent slots (0 & 1,
+   * 2 & 3, ...) are paired for the next round on the following gameweek. A
+   * drawn match is won by its home slot, which is always the better original
+   * seed — see `seedPlayoffPairings`. Returns the crowned champion once only
+   * the final's winner remains.
+   */
+  public async advancePlayoffRound(
+    leagueId: string,
+    completedGameweekId: number
+  ): Promise<
+    | { champion: string }
+    | { gameweekId: number; round: number; pairings: Array<{ homeMemberId: string; awayMemberId: string }> }
+  > {
+    const fixtures = await this.db.leagueFixture.findMany({
+      where: { leagueId, gameweekId: completedGameweekId, isPlayoff: true },
+    });
+
+    if (fixtures.length === 0) {
+      throw new LeagueValidationError(
+        `No playoff fixtures found for league ${leagueId} in gameweek ${completedGameweekId}`
+      );
+    }
+    if (fixtures.some((f: any) => !f.isFinished)) {
+      throw new LeagueValidationError(
+        "All playoff fixtures for this gameweek must be settled before advancing the bracket"
+      );
+    }
+
+    const bySlot = [...fixtures].sort(
+      (a: any, b: any) => (a.playoffSlot ?? 0) - (b.playoffSlot ?? 0)
+    );
+    const winners = bySlot.map((f: any) =>
+      (f.homeScore ?? 0) >= (f.awayScore ?? 0) ? f.homeMemberId : f.awayMemberId
+    );
+
+    if (winners.length === 1) {
+      return { champion: winners[0] };
+    }
+
+    const round = (fixtures[0].playoffRound ?? 1) + 1;
+    const gameweekId = completedGameweekId + 1;
+    const pairings = LeagueService.seedPlayoffPairings(winners);
+
+    await this.db.$transaction(async (tx: any) => {
+      await tx.leagueFixture.deleteMany({
+        where: { leagueId, gameweekId, isFinished: false },
+      });
+      await tx.leagueFixture.createMany({
+        data: pairings.map((p, slot) => ({
+          leagueId,
+          gameweekId,
+          homeMemberId: p.homeMemberId,
+          awayMemberId: p.awayMemberId,
+          isPlayoff: true,
+          playoffRound: round,
+          playoffSlot: slot,
+        })),
+      });
+    });
+
+    return { gameweekId, round, pairings };
+  }
+
+  /**
    * True when a league missed its minimum member threshold and its start
    * gameweek has kicked off (falls back to the deadline when no kickoff is known).
    */
@@ -790,22 +1291,17 @@ export class LeagueService {
   }
 
   /**
+  * Retrieves a single league with gameweeks and creator info.
    * Retrieves a single league with members, gameweeks, and creator info.
+   * The invite code of a private league is only revealed to its creator.
    */
-  public async getLeagueById(leagueId: string) {
-    const league = await prisma.league.findUnique({
+  public async getLeagueById(leagueId: string, viewerId?: string) {
+    const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
         creator: { select: { id: true, username: true } },
         startGameweek: true,
         endGameweek: true,
-        members: {
-          include: {
-            user: { select: { id: true, username: true } },
-            squad: { select: { id: true, name: true } },
-          },
-          orderBy: { joinedAt: "asc" },
-        },
       },
     });
 
@@ -819,32 +1315,240 @@ export class LeagueService {
     );
 
     return {
-      ...league,
+      ...LeagueService.redactForViewer(league, viewerId),
       prizeDistribution,
     };
   }
 
-  /**
-   * Retrieves all public leagues with optional status filtering.
-   */
-  public async getLeagues(filters?: { status?: LeagueStatus; creatorId?: string }) {
-    const where: any = {};
-    if (filters?.status) {
-      where.status = filters.status;
-    }
-    if (filters?.creatorId) {
-      where.creatorId = filters.creatorId;
+  /** Retrieves one page without loading the full membership relation. */
+  public async getLeagueMembers(leagueId: string, page: number, limit: number) {
+    const league = await this.db.league.findUnique({
+      where: { id: leagueId },
+      select: { id: true },
+    });
+
+    if (!league) {
+      throw new LeagueNotFoundError(leagueId);
     }
 
-    return prisma.league.findMany({
-      where,
-      include: {
-        creator: { select: { id: true, username: true } },
-        startGameweek: { select: { id: true, name: true, deadline: true } },
-        endGameweek: { select: { id: true, name: true } },
-      },
-      orderBy: { createdAt: "desc" },
+    const skip = (page - 1) * limit;
+    const [members, total] = await Promise.all([
+      this.db.leagueMember.findMany({
+        where: { leagueId },
+        include: {
+          user: { select: { id: true, username: true } },
+          squad: { select: { id: true, name: true } },
+        },
+        orderBy: [{ joinedAt: "asc" }, { id: "asc" }],
+        skip,
+        take: limit,
+      }),
+      this.db.leagueMember.count({ where: { leagueId } }),
+    ]);
+
+    return {
+      members,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  /**
+   * Hides the static invite code of private leagues from everyone but the creator,
+   * so it can never be used to bypass single-use invitations.
+   */
+  public static redactForViewer<T extends { isPrivate?: boolean; creatorId: string; inviteCode?: string | null }>(
+    league: T,
+    viewerId?: string
+  ): T {
+    if (league.isPrivate && league.creatorId !== viewerId) {
+      return { ...league, inviteCode: null };
+    }
+    return league;
+  }
+
+  /**
+   * Parses and validates raw query-string filters for league search.
+   * Throws LeagueValidationError on malformed input.
+   */
+  public static parseSearchFilters(query: Record<string, unknown>): LeagueSearchFilters {
+    const str = (key: string): string | undefined => {
+      const value = query[key];
+      if (value === undefined || value === "") return undefined;
+      if (typeof value !== "string") {
+        throw new LeagueValidationError(`${key} must be a single value`);
+      }
+      return value.trim();
+    };
+    const num = (key: string, { integer = false, min = 0 } = {}): number | undefined => {
+      const raw = str(key);
+      if (raw === undefined) return undefined;
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < min || (integer && !Number.isInteger(value))) {
+        throw new LeagueValidationError(
+          `${key} must be ${integer ? "an integer" : "a number"} greater than or equal to ${min}`
+        );
+      }
+      return value;
+    };
+    const bool = (key: string): boolean | undefined => {
+      const raw = str(key);
+      if (raw === undefined) return undefined;
+      if (raw !== "true" && raw !== "false") {
+        throw new LeagueValidationError(`${key} must be 'true' or 'false'`);
+      }
+      return raw === "true";
+    };
+
+    const q = str("q");
+    if (q && q.length > 60) {
+      throw new LeagueValidationError("Search query must not exceed 60 characters");
+    }
+
+    const code = str("code");
+    if (code && !/^[A-Za-z0-9]{4,12}$/.test(code)) {
+      throw new LeagueValidationError("code must be 4-12 alphanumeric characters");
+    }
+
+    const status = str("status");
+    if (status && !Object.values(LeagueStatus).includes(status as LeagueStatus)) {
+      throw new LeagueValidationError(`Invalid status: ${status}`);
+    }
+    const scoringType = str("scoringType");
+    if (scoringType && !Object.values(ScoringType).includes(scoringType as ScoringType)) {
+      throw new LeagueValidationError(`Invalid scoring type: ${scoringType}`);
+    }
+    const sortBy = str("sortBy");
+    if (sortBy && !(sortBy in LEAGUE_SORT_FIELDS)) {
+      throw new LeagueValidationError(
+        `sortBy must be one of: ${Object.keys(LEAGUE_SORT_FIELDS).join(", ")}`
+      );
+    }
+    const sortOrder = str("sortOrder");
+    if (sortOrder && sortOrder !== "asc" && sortOrder !== "desc") {
+      throw new LeagueValidationError("sortOrder must be 'asc' or 'desc'");
+    }
+
+    const filters: LeagueSearchFilters = {
+      q: q || undefined,
+      code: code?.toUpperCase(),
+      status: status as LeagueStatus | undefined,
+      scoringType: scoringType as ScoringType | undefined,
+      creatorId: str("creatorId"),
+      minEntryFee: num("minEntryFee"),
+      maxEntryFee: num("maxEntryFee"),
+      minSize: num("minSize", { integer: true, min: 2 }),
+      maxSize: num("maxSize", { integer: true, min: 2 }),
+      hasOpenSlots: bool("hasOpenSlots"),
+      sortBy: sortBy as LeagueSortField | undefined,
+      sortOrder: sortOrder as "asc" | "desc" | undefined,
+      page: num("page", { integer: true, min: 1 }),
+      pageSize: num("pageSize", { integer: true, min: 1 }),
+    };
+
+    if (
+      filters.minEntryFee !== undefined &&
+      filters.maxEntryFee !== undefined &&
+      filters.minEntryFee > filters.maxEntryFee
+    ) {
+      throw new LeagueValidationError("minEntryFee cannot be greater than maxEntryFee");
+    }
+    if (filters.minSize !== undefined && filters.maxSize !== undefined && filters.minSize > filters.maxSize) {
+      throw new LeagueValidationError("minSize cannot be greater than maxSize");
+    }
+    if (filters.pageSize !== undefined && filters.pageSize > LEAGUE_SEARCH_MAX_PAGE_SIZE) {
+      throw new LeagueValidationError(`pageSize must not exceed ${LEAGUE_SEARCH_MAX_PAGE_SIZE}`);
+    }
+
+    return filters;
+  }
+
+  /**
+   * Builds the Prisma `where` clause for a league search. Private leagues are only
+   * visible to their creator and members.
+   */
+  public buildSearchWhere(filters: LeagueSearchFilters = {}, viewerId?: string) {
+    const and: Record<string, unknown>[] = [];
+
+    and.push({
+      OR: [
+        { isPrivate: false },
+        ...(viewerId
+          ? [{ creatorId: viewerId }, { members: { some: { userId: viewerId } } }]
+          : []),
+      ],
     });
+
+    if (filters.q) {
+      and.push({ name: { contains: filters.q, mode: "insensitive" } });
+    }
+    if (filters.code) and.push({ inviteCode: filters.code });
+    if (filters.status) and.push({ status: filters.status });
+    if (filters.scoringType) and.push({ scoringType: filters.scoringType });
+    if (filters.creatorId) and.push({ creatorId: filters.creatorId });
+
+    if (filters.minEntryFee !== undefined || filters.maxEntryFee !== undefined) {
+      and.push({
+        entryFee: {
+          ...(filters.minEntryFee !== undefined ? { gte: filters.minEntryFee } : {}),
+          ...(filters.maxEntryFee !== undefined ? { lte: filters.maxEntryFee } : {}),
+        },
+      });
+    }
+    if (filters.minSize !== undefined || filters.maxSize !== undefined) {
+      and.push({
+        maxMembers: {
+          ...(filters.minSize !== undefined ? { gte: filters.minSize } : {}),
+          ...(filters.maxSize !== undefined ? { lte: filters.maxSize } : {}),
+        },
+      });
+    }
+    if (filters.hasOpenSlots) {
+      // Column-to-column comparison: currentMembers < maxMembers
+      and.push({ currentMembers: { lt: this.db.league.fields.maxMembers } });
+    }
+
+    return { AND: and };
+  }
+
+  /**
+   * Searches leagues by name, entry fee, size and more, with pagination.
+   * Private leagues only appear for their creator and members.
+   */
+  public async getLeagues(
+    filters: LeagueSearchFilters = {},
+    viewerId?: string
+  ): Promise<LeagueSearchResult<any>> {
+    const page = filters.page ?? 1;
+    const pageSize = Math.min(filters.pageSize ?? LEAGUE_SEARCH_DEFAULT_PAGE_SIZE, LEAGUE_SEARCH_MAX_PAGE_SIZE);
+    const sortField = LEAGUE_SORT_FIELDS[filters.sortBy ?? "newest"];
+    const sortOrder = filters.sortOrder ?? "desc";
+    const where = this.buildSearchWhere(filters, viewerId);
+
+    const [items, total] = await Promise.all([
+      this.db.league.findMany({
+        where,
+        include: {
+          creator: { select: { id: true, username: true } },
+          startGameweek: { select: { id: true, name: true, deadline: true } },
+          endGameweek: { select: { id: true, name: true } },
+        },
+        // Secondary key keeps pagination stable when the primary sort ties
+        orderBy: [{ [sortField]: sortOrder }, { id: "asc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.db.league.count({ where }),
+    ]);
+
+    return {
+      items: items.map((league: any) => LeagueService.redactForViewer(league, viewerId)),
+      total,
+      page,
+      pageSize,
+    };
   }
 }
 
