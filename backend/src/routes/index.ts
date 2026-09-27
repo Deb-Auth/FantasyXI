@@ -10,6 +10,7 @@ import authRoutes from "./auth.routes.js";
 import liveRoutes from "./live.routes.js";
 import adminRoutes from "./admin.routes.js";
 import leaderboardRoutes from "./leaderboard.routes.js";
+import sep8Routes from "./sep8.routes.js";
 import { replicaReads } from "../middleware/readConsistency.js";
 
 /**
@@ -22,6 +23,7 @@ const apiV1Router = Router();
 apiV1Router.use("/auth", authRoutes);
 apiV1Router.use("/admin/sync", syncRoutes);
 apiV1Router.use("/admin", adminRoutes);
+apiV1Router.use("/sep8", sep8Routes);
 
 // Read-heavy public data: GET requests may be served by the nearest read replica.
 // All other routers (auth, squads, admin, sync) always use the primary database.
