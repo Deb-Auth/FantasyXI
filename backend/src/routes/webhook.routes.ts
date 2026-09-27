@@ -4,7 +4,7 @@ import {
   listEndpoints,
   testDispatch,
   listDeliveries,
-} from "./webhookController.js";
+} from "../controllers/webhook.controller.js";
 
 const router = Router();
 

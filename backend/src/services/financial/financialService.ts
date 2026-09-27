@@ -123,21 +123,6 @@ export class FinancialService {
     private readonly db: any = prisma,
     private readonly stellar: StellarService = stellarService,
     emailOrDeadLetters?: EmailService | PayoutDeadLetterService,
-    private readonly audit: FinancialAuditRecorder = financialAuditLog
-  ) {
-    // Email notifications were introduced while the dead-letter queue was
-    // being merged. Accept either third argument to preserve both call sites.
-    this.email =
-      emailOrDeadLetters instanceof PayoutDeadLetterService
-        ? emailService
-        : emailOrDeadLetters ?? emailService;
-    // Share the injected DB so the DLQ and the ledger always see the same state
-    this.deadLetters =
-      emailOrDeadLetters instanceof PayoutDeadLetterService
-        ? emailOrDeadLetters
-        : db === prisma
-          ? payoutDeadLetterService
-          : new PayoutDeadLetterService(db, audit);
     audit: FinancialAuditRecorder = financialAuditLog
   ) {
     const hasDeadLetterMethods =
