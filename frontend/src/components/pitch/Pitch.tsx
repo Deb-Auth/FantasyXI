@@ -12,6 +12,8 @@ export const Pitch: React.FC = () => {
   // inside the selector: a selector that returns a freshly filtered/sorted array
   // on every call breaks useSyncExternalStore's reference-equality check and
   // causes an infinite re-render loop ("Maximum update depth exceeded").
+  // Select the stable players array and derive from it: a selector returning a
+  // new array on every call makes zustand re-render forever
   const players = useTeamStore((state) => state.players);
   const starters = useMemo(
     () => players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder),

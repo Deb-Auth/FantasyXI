@@ -9,6 +9,7 @@ import { useTeamStore } from "@/store/teamStore";
 export const Bench: React.FC = () => {
   // See Pitch.tsx: derive with useMemo, not inside the selector, to avoid an
   // infinite re-render loop from useSyncExternalStore reference-equality checks.
+  // Derived with useMemo: a selector returning a new array loops forever in zustand
   const players = useTeamStore((state) => state.players);
   const benchPlayers = useMemo(
     () => players.filter((p) => !p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder),
