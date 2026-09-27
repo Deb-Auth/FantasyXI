@@ -1,13 +1,13 @@
 /**
- * Frontend Soroban Escrow Deposit Helper
+ * Frontend Soroban Escrow Deposit Helper (Issue #85)
  *
- * Implements the canonical client-side Soroban deposit workflow:
- * 1. Wallet adapter connection & signing
+ * Implements the canonical client-side Soroban deposit workflow for Freighter wallets:
+ * 1. Freighter wallet adapter connection & signing (`WalletContext.tsx`)
  * 2. Building the Soroban invocation transaction: `deposit(participant, league_id)`
- * 3. Simulating/preparing the transaction via Soroban RPC
- * 4. Requesting user signature via Freighter (`signTransaction`)
- * 5. Submitting the signed transaction to Stellar Testnet
- * 6. Polling for on-chain confirmation and returning the transaction hash
+ * 3. Simulating/preparing transaction footprints via Soroban RPC
+ * 4. Requesting user signature via Freighter browser extension (`signTransaction`)
+ * 5. Submitting the signed XDR transaction to Stellar Testnet
+ * 6. Polling for on-chain ledger confirmation and returning the transaction hash
  */
 
 import {
@@ -45,6 +45,28 @@ export type WalletTransactionSigner = (
 export interface DepositResult {
   txHash: string;
   ledgerSeq?: number;
+}
+
+/**
+ * Raised when a deposit was signed and submitted to the network but its final
+ * status could not be confirmed before we stopped polling (RPC latency or a
+ * dropped connection). The transaction may still succeed on-chain, so callers
+ * must not treat this the same as a rejected or failed transaction: retrying
+ * the deposit from scratch could double-spend. `txHash` lets the caller check
+ * status again later (e.g. via a backend reconciliation endpoint) instead of
+ * resubmitting.
+ */
+export class SorobanDepositTimeoutError extends Error {
+  public readonly txHash: string;
+
+  constructor(txHash: string) {
+    super(
+      "Your transaction was submitted but we could not confirm its status before timing out. " +
+        "It may still succeed on-chain — click retry to check its status again."
+    );
+    this.name = "SorobanDepositTimeoutError";
+    this.txHash = txHash;
+  }
 }
 
 const DEFAULT_SOROBAN_RPC =
@@ -200,6 +222,13 @@ export async function depositToSorobanEscrow(
       }
       // Network hiccup during poll - continue
     }
+  }
+
+  if (confirmedLedgerSeq === undefined) {
+    // Exhausted every poll attempt without a SUCCESS or FAILED status. The transaction
+    // is still "in flight" from our perspective — do not report success, and do not let
+    // the caller silently treat this as a confirmed deposit.
+    throw new SorobanDepositTimeoutError(txHash);
   }
 
   onProgress?.("Transaction confirmed on-chain!");

@@ -2,10 +2,16 @@ import express, { Request, Response, NextFunction } from "express";
 import dotenv from "dotenv";
 import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
+import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
+import { Permission } from "./types/index.js";
 import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@as-integrations/express5";
 import DataLoader from "dataloader";
-import { prisma } from "./config/db.js";
+import { prisma, getReadReplicaStatus } from "./config/db.js";
+import { closeRedisClient } from "./config/redis.js";
+import { preferReplicaReads } from "./middleware/readConsistency.js";
+import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
 import { typeDefs } from "./graphql/schema.js";
 
@@ -19,12 +25,79 @@ app.get("/api/health/queues", async (_req: Request, res: Response, next: NextFun
     res.status(health.running ? 200 : 503).json({
       success: health.running,
       data: health,
+// Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
+app.set("trust proxy", 1);
+
+// ============================================================
+// Middleware
+// ============================================================
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    credentials: true,
+  })
+);
+app.use(express.json());
+app.use(apiRateLimiter);
+
+// ============================================================
+// Routes
+// ============================================================
+
+app.get("/", (_req: Request, res: Response) => {
+  res.json({
+    name: "FantasyXI API",
+    version: "0.2.0",
+    status: "running",
+  });
+});
+
+app.get("/api/health", (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    message: "FantasyXI API is running",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Queue internals are operational data: staff and SERVICE (e.g. monitoring) only
+app.get(
+  "/api/health/queues",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const health = await getQueueHealth();
+      res.status(health.running ? 200 : 503).json({
+        success: health.running,
+        data: health,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Replica topology and lag are operational data, like queue health
+app.get(
+  "/api/health/replicas",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  (_req: Request, res: Response) => {
+    const replicas = getReadReplicaStatus();
+    res.json({
+      success: true,
+      data: {
+        enabled: replicas.length > 0,
+        appRegion: process.env.APP_REGION ?? null,
+        replicas,
+      },
       timestamp: new Date().toISOString(),
     });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 // ============================================================
 // Start server
@@ -36,6 +109,8 @@ async function startServer(): Promise<void> {
   await apolloServer.start();
   app.use(
     "/graphql",
+    // The schema is query-only, so GraphQL reads may be served by a replica
+    preferReplicaReads,
     express.json(),
     expressMiddleware(apolloServer, {
       context: async () => ({
@@ -86,5 +161,9 @@ startServer().catch((error) => {
 });
 
 process.on("SIGTERM", () => {
-  stopJobQueue().finally(() => process.exit(0));
+  // Persist buffered financial audit entries before exiting
+  stopJobQueue()
+    .finally(() => financialAuditLog.close())
+    .finally(() => closeRedisClient())
+    .finally(() => process.exit(0));
 });
