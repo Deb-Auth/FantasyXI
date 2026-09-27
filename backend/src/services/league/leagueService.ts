@@ -1086,6 +1086,37 @@ export class LeagueService {
     return pairings;
   }
 
+  /** Resolves equal-score playoff fixtures by regular-season performance. */
+  public static resolvePlayoffWinner(
+    fixture: {
+      homeMemberId: string;
+      awayMemberId: string;
+      homeScore: number | null;
+      awayScore: number | null;
+    },
+    members: Map<string, { h2hPoints: number; pointsFor: number; pointsAgainst: number; matchesWon: number }>
+  ): string {
+    const homeScore = fixture.homeScore ?? 0;
+    const awayScore = fixture.awayScore ?? 0;
+    if (homeScore !== awayScore) {
+      return homeScore > awayScore ? fixture.homeMemberId : fixture.awayMemberId;
+    }
+
+    const home = members.get(fixture.homeMemberId);
+    const away = members.get(fixture.awayMemberId);
+    if (home && away) {
+      const homeMetrics = [home.h2hPoints, home.pointsFor, home.pointsFor - home.pointsAgainst, home.matchesWon];
+      const awayMetrics = [away.h2hPoints, away.pointsFor, away.pointsFor - away.pointsAgainst, away.matchesWon];
+      for (let index = 0; index < homeMetrics.length; index++) {
+        if (homeMetrics[index] !== awayMetrics[index]) {
+          return homeMetrics[index] > awayMetrics[index] ? fixture.homeMemberId : fixture.awayMemberId;
+        }
+      }
+    }
+
+    return fixture.homeMemberId;
+  }
+
   /**
    * Generates the first round of an end-of-season H2H playoff bracket from the
    * current regular-season standings. Qualifies the top 2/4/8 members (whichever
@@ -1146,11 +1177,11 @@ export class LeagueService {
   }
 
   /**
-   * Advances the bracket once every fixture of a completed playoff round has
-   * been settled (via `settleH2HGameweek`). Winners of adjacent slots (0 & 1,
-   * 2 & 3, ...) are paired for the next round on the following gameweek. A
-   * drawn match is won by its home slot, which is always the better original
-   * seed — see `seedPlayoffPairings`. Returns the crowned champion once only
+    * Advances the bracket once every fixture of a completed playoff round has
+  * been settled (via `settleH2HGameweek`). Winners of adjacent slots (0 & 1,
+  * 2 & 3, ...) are paired for the next round on the following gameweek. A
+  * drawn match is resolved by regular-season standings, with the better seed
+  * as the final fallback. Returns the crowned champion once only
    * the final's winner remains.
    */
   public async advancePlayoffRound(
@@ -1178,8 +1209,18 @@ export class LeagueService {
     const bySlot = [...fixtures].sort(
       (a: any, b: any) => (a.playoffSlot ?? 0) - (b.playoffSlot ?? 0)
     );
-    const winners = bySlot.map((f: any) =>
-      (f.homeScore ?? 0) >= (f.awayScore ?? 0) ? f.homeMemberId : f.awayMemberId
+    const tiedMemberIds = [...new Set(bySlot
+      .filter((f: any) => (f.homeScore ?? 0) === (f.awayScore ?? 0))
+      .flatMap((f: any) => [f.homeMemberId, f.awayMemberId]))];
+    const tiedMembers = tiedMemberIds.length > 0
+      ? await this.db.leagueMember.findMany({
+          where: { id: { in: tiedMemberIds } },
+          select: { id: true, h2hPoints: true, pointsFor: true, pointsAgainst: true, matchesWon: true },
+        })
+      : [];
+    const membersById = new Map<string, any>(tiedMembers.map((member: any) => [member.id, member]));
+    const winners = bySlot.map((fixture: any) =>
+      LeagueService.resolvePlayoffWinner(fixture, membersById)
     );
 
     if (winners.length === 1) {

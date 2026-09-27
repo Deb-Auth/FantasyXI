@@ -30,6 +30,8 @@ pub enum EscrowError {
     NoClaimablePrize = 13,
     InvalidProof = 14,
     InvalidMultisig = 15,
+    InvalidGameweekResult = 16,
+    GameweekResultConflict = 17,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,6 +77,7 @@ pub enum DataKey {
     League(u64),
     Deposit(u64, Address),
     ClaimablePrize(u64, Address),
+    GameweekResult(u64),
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -250,6 +253,49 @@ impl FantasyXIEscrow {
         );
 
         Ok(())
+    }
+
+    /// Publishes an immutable commitment to finalized off-chain gameweek scores.
+    pub fn publish_gameweek_result(
+        env: Env,
+        admin: Address,
+        gameweek_id: u64,
+        result_hash: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::authorize_signers(&env, &approvals)?;
+
+        if result_hash.to_array().iter().all(|byte| *byte == 0) {
+            return Err(EscrowError::InvalidGameweekResult);
+        }
+
+        let key = DataKey::GameweekResult(gameweek_id);
+        if let Some(existing) = env.storage().persistent().get::<_, BytesN<32>>(&key) {
+            return if existing == result_hash {
+                Ok(())
+            } else {
+                Err(EscrowError::GameweekResultConflict)
+            };
+        }
+
+        env.storage().persistent().set(&key, &result_hash);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.events().publish(
+            (symbol_short!("gw_result"), gameweek_id),
+            result_hash,
+        );
+        Ok(())
+    }
+
+    pub fn get_gameweek_result_hash(env: Env, gameweek_id: u64) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::GameweekResult(gameweek_id))
     }
 
     /// Admin settles the league, transferring platform fee and winner payouts.
