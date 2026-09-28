@@ -43,9 +43,7 @@ export const authRateLimiter: RateLimitRequestHandler = rateLimit({
  */
 export const apiRateLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: 60 * 1000, // 1 minute window
-  max: parseInt(process.env.API_RATE_LIMIT_MAX || "100", 10), // Max 100 requests per minute per IP
-  windowMs: 15 * 60 * 1000, // 15 minutes window
-  max: configuredLimit("API_RATE_LIMIT_MAX", 100), // Max 100 requests per 15 minutes
+  max: configuredLimit("API_RATE_LIMIT_MAX", 100), // Max 100 requests per minute per IP
   standardHeaders: true,
   legacyHeaders: false,
   validate: { trustProxy: false },

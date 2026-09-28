@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import apiV1Router from "./routes/index.js";
+import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
 import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
@@ -18,7 +18,6 @@ import { typeDefs } from "./graphql/schema.js";
 
 dotenv.config();
 
-const app = express();
 const apolloServer = new ApolloServer({ typeDefs, resolvers });
 
 // Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
@@ -94,37 +93,6 @@ app.get(
     });
   }
 );
-
-// API v1 Routes
-app.use("/api/v1", apiV1Router);
-app.use("/api", apiV1Router);
-
-
-// ============================================================
-// Global error handler
-// ============================================================
-
-/**
- * Express error-handling middleware.
- *
- * Laravel equivalent: This is like your app/Exceptions/Handler.php —
- * a single place that catches all unhandled errors and returns a
- * consistent JSON response.
- *
- * The 4-parameter signature (err, req, res, next) tells Express
- * this is an error handler, not a regular middleware.
- */
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  console.error("Unhandled error:", err);
-
-  res.status(500).json({
-    success: false,
-    message:
-      process.env.NODE_ENV === "production"
-        ? "Internal server error"
-        : err.message,
-  });
-});
 
 // ============================================================
 // Start server

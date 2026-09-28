@@ -8,8 +8,6 @@ import {
 } from "../controllers/payoutAdmin.controller.js";
 import { recalculateStandings } from "../controllers/leagueAdmin.controller.js";
 import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
-import { requireAuth, requireRole } from "../middleware/authMiddleware.js";
-import { UserRole } from "../types/index.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
 
