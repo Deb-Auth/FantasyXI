@@ -6,7 +6,7 @@ import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
-import { Squad, Player, Position, SQUAD_RULES } from "@/types";
+import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
 import { BudgetBar } from "@/components/team/BudgetBar";
@@ -59,6 +59,12 @@ export default function TeamPage() {
   const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
   const showingSnapshot = useRef(false);
   const userId = user?.id;
+  
+  // Wildcard chip state
+  const [isWildcardActive, setIsWildcardActive] = useState<boolean>(false);
+  const [currentGameweek, setCurrentGameweek] = useState<{ id: number; name: string; deadline: string } | null>(null);
+  const [chipUsages, setChipUsages] = useState<SquadChipUsage[]>([]);
+  const [isActivatingChip, setIsActivatingChip] = useState<boolean>(false);
 
   // Load existing squad
   useEffect(() => {
@@ -95,12 +101,30 @@ export default function TeamPage() {
     async function loadSquad() {
       setIsLoading(true);
       try {
-        const res = await api.get<{ success: boolean; data: Squad[] }>("/api/v1/squads/me");
+        const [squadRes, gameweekRes] = await Promise.all([
+          api.get<{ success: boolean; data: Squad[] }>("/api/v1/squads/me"),
+          api.get<{ success: boolean; data: { id: number; name: string; deadline: string } | null }>("/api/v1/gameweeks/current"),
+        ]);
         if (cancelled) return;
-        if (res?.data) {
-          saveSquadSnapshot(userId!, res.data);
-          applySquads(res.data);
+        
+        if (squadRes?.data) {
+          saveSquadSnapshot(userId!, squadRes.data);
+          applySquads(squadRes.data);
+          
+          // Load chip usages if squad has them
+          if (squadRes.data[0]?.chipUsages) {
+            setChipUsages(squadRes.data[0].chipUsages);
+          }
         }
+        
+        if (gameweekRes?.data) {
+          setCurrentGameweek({
+            id: gameweekRes.data.id,
+            name: gameweekRes.data.name,
+            deadline: gameweekRes.data.deadline,
+          });
+        }
+        
         showingSnapshot.current = false;
         setOfflineSnapshotAt(null);
       } catch (err) {
@@ -454,6 +478,58 @@ export default function TeamPage() {
     }
   };
 
+  // Activate Wildcard chip
+  const handleActivateWildcard = async () => {
+    if (!squadId || !currentGameweek || !isOnline) {
+      setErrorMessage("Cannot activate Wildcard: squad ID or current gameweek not available, or you are offline.");
+      return;
+    }
+
+    setIsActivatingChip(true);
+    setErrorMessage(null);
+
+    try {
+      await api.post(`/api/v1/squads/${squadId}/chip`, {
+        chipType: ChipType.WILDCARD,
+        gameweekId: currentGameweek.id,
+      });
+
+      setIsWildcardActive(true);
+      const newUsage: SquadChipUsage = {
+        id: Date.now(),
+        squadId,
+        gameweekId: currentGameweek.id,
+        chipType: ChipType.WILDCARD,
+        season: new Date().getFullYear().toString(),
+        usedAt: new Date().toISOString(),
+      };
+      setChipUsages([...chipUsages, newUsage]);
+      
+      toast.success("Wildcard activated! All transfers this gameweek are free.");
+    } catch (err: unknown) {
+      const msg =
+        err instanceof ApiError
+          ? err.message || "Failed to activate Wildcard."
+          : err instanceof Error
+            ? err.message
+            : "An unexpected error occurred while activating Wildcard.";
+      setErrorMessage(msg);
+      toast.error(msg);
+    } finally {
+      setIsActivatingChip(false);
+    }
+  };
+
+  // Check if Wildcard is already active for current gameweek
+  useEffect(() => {
+    if (currentGameweek && chipUsages.length > 0) {
+      const wildcardForGameweek = chipUsages.find(
+        (usage) => usage.chipType === ChipType.WILDCARD && usage.gameweekId === currentGameweek.id
+      );
+      setIsWildcardActive(!!wildcardForGameweek);
+    }
+  }, [currentGameweek, chipUsages]);
+
   if (isLoading) {
     return (
       <div className="py-24 text-center text-slate-400">
@@ -490,11 +566,38 @@ export default function TeamPage() {
           </div>
 
           {/* Formation & Rules status */}
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
-            <span className="text-emerald-400 font-bold text-sm">
-              {detectFormation(starters)}
-            </span>
+          <div className="flex items-center gap-4 text-xs font-mono">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
+              <span className="text-emerald-400 font-bold text-sm">
+                {detectFormation(starters)}
+              </span>
+            </div>
+            
+            {/* Wildcard Chip Toggle */}
+            {currentGameweek && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleActivateWildcard}
+                  disabled={isWildcardActive || isActivatingChip || !isOnline}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                    isWildcardActive
+                      ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 cursor-not-allowed"
+                      : "bg-amber-500/20 text-amber-400 border border-amber-500/50 hover:bg-amber-500/30"
+                  } disabled:opacity-50`}
+                  data-testid="wildcard-toggle"
+                >
+                  {isActivatingChip ? (
+                    "Activating..."
+                  ) : isWildcardActive ? (
+                    "Wildcard Active"
+                  ) : (
+                    "Activate Wildcard"
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 

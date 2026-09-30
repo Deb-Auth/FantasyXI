@@ -52,6 +52,13 @@ export enum TransactionStatus {
   FAILED = "FAILED",
 }
 
+export enum ChipType {
+  TRIPLE_CAPTAIN = "TRIPLE_CAPTAIN",
+  BENCH_BOOST = "BENCH_BOOST",
+  FREE_HIT = "FREE_HIT",
+  WILDCARD = "WILDCARD",
+}
+
 // ============================================================
 // API response types
 // ============================================================
@@ -165,6 +172,7 @@ export interface Squad {
   budgetRemaining: number;
   totalPoints: number;
   players?: SquadPlayer[];
+  chipUsages?: SquadChipUsage[];
   createdAt: string;
 }
 
@@ -178,6 +186,16 @@ export interface SquadPlayer {
   isStarter: boolean;
   positionOrder: number;
   purchasePrice: number;
+}
+
+export interface SquadChipUsage {
+  id: number;
+  squadId: string;
+  gameweekId: number;
+  chipType: ChipType;
+  season: string;
+  usedAt: string;
+  revertedAt?: string | null;
 }
 
 export interface League {
