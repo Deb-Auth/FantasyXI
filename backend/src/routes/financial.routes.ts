@@ -5,6 +5,7 @@ import {
   verifyPayment,
   reconcileDeposit,
   getSettlementPlan,
+  executeSettlement,
   reconcileLeague,
   getAffiliateDashboard,
 } from "../controllers/financial.controller.js";
@@ -18,6 +19,12 @@ const router = Router({ mergeParams: true });
 router.use(requireAuth);
 router.use(financialRateLimiter);
 
+router.get("/requirement", getPaymentRequirement);
+router.post("/submit", submitPayment);
+router.post("/verify", verifyPayment);
+router.get("/settlement-plan", getSettlementPlan);
+router.post("/settle", requireRole(UserRole.ADMIN), executeSettlement);
+router.get("/affiliate-dashboard", getAffiliateDashboard);
 router.get("/requirement", requirePermission(Permission.PAYMENT_MANAGE_OWN), getPaymentRequirement);
 router.post("/submit", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), submitPayment);
 router.post("/verify", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), verifyPayment);

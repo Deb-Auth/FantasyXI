@@ -63,6 +63,7 @@ export interface WinnerPayoutParam {
 export interface InvocationResult {
   success: boolean;
   txHash?: string;
+  ledgerSeq?: number;
   returnValue?: unknown;
   error?: string;
   contractErrorCode?: number;
@@ -191,6 +192,7 @@ export class SorobanContractClient {
         return {
           success: true,
           txHash: sent.hash,
+          ledgerSeq: result.ledger,
           returnValue: result.returnValue ? scValToNative(result.returnValue) : undefined,
         };
       }
