@@ -18,11 +18,15 @@ import {
   MembershipStatus,
   PaymentStatus,
   ScoringType,
+  LeagueTierMovement,
   TransactionType,
   TransactionStatus,
   ChipType,
   UserRole,
 } from "@prisma/client";
+
+export { Role, Permission } from "../config/permissions.js";
+import type { Role } from "../config/permissions.js";
 
 export {
   Position,
@@ -30,6 +34,7 @@ export {
   MembershipStatus,
   PaymentStatus,
   ScoringType,
+  LeagueTierMovement,
   TransactionType,
   TransactionStatus,
   ChipType,
@@ -86,7 +91,8 @@ export interface AuthUser {
   email: string;
   username: string;
   name?: string | null;
-  role: UserRole;
+  /** USER / MODERATOR / ADMIN for accounts, SERVICE for API-key callers */
+  role: Role;
 }
 
 /** Safe user representation returned across public and auth endpoints */
@@ -96,6 +102,11 @@ export interface SafeUser {
   username: string;
   name?: string | null;
   role: UserRole;
+  /** Sign-in methods available to the account (email/password and/or Google) */
+  authProviders: {
+    password: boolean;
+    google: boolean;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -221,6 +232,32 @@ export interface CreateLeagueInput {
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
   isPrivate?: boolean; // default false: private leagues are invitation-only
+}
+
+export interface CreateLeagueTierGroupInput {
+  name: string;
+  season: string;
+  slug?: string;
+  description?: string;
+  isActive?: boolean;
+}
+
+export interface CreateLeagueTierInput {
+  groupId: string;
+  name: string;
+  rank: number;
+  slug?: string;
+  description?: string;
+  promotionTargetTierId?: string | null;
+  relegationTargetTierId?: string | null;
+}
+
+export interface LeagueTierTransitionInput {
+  leagueId: string;
+  season: string;
+  rank: number;
+  movement?: LeagueTierMovement;
+  targetTierId?: string | null;
 }
 
 export type LeagueSortField = "newest" | "entryFee" | "size" | "prizePool" | "members";
