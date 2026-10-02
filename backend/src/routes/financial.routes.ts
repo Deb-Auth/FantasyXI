@@ -10,12 +10,13 @@ import {
 } from "../controllers/financial.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
-import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
+import { financialRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
 
 const router = Router({ mergeParams: true });
 
-// All financial actions require valid JWT authentication
-router.use(requireAuth, authenticatedRateLimiter);
+// All financial actions require valid JWT authentication and are protected by financial rate limits
+router.use(requireAuth);
+router.use(financialRateLimiter);
 
 router.get("/requirement", requirePermission(Permission.PAYMENT_MANAGE_OWN), getPaymentRequirement);
 router.post("/submit", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), submitPayment);
@@ -31,4 +32,3 @@ router.post("/reconcile-deposit", mutationRateLimiter, requirePermission(Permiss
 router.get("/reconcile", requirePermission(Permission.FINANCIAL_RECONCILE), reconcileLeague);
 
 export default router;
-
