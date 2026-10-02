@@ -30,6 +30,8 @@ pub enum EscrowError {
     NoClaimablePrize = 13,
     InvalidProof = 14,
     InvalidMultisig = 15,
+    InvalidGameweekResult = 16,
+    GameweekResultConflict = 17,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,8 +77,12 @@ pub enum DataKey {
     League(u64),
     Deposit(u64, Address),
     ClaimablePrize(u64, Address),
+    GameweekResult(u64),
 }
 
+/// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
+/// Provides non-custodial holding of USDC entry fee deposits for competition partitions.
+/// Ensures trustless settlement, prize claim storage, and refund mechanisms.
 #[contract]
 pub struct FantasyXIEscrow;
 
@@ -247,6 +253,49 @@ impl FantasyXIEscrow {
         );
 
         Ok(())
+    }
+
+    /// Publishes an immutable commitment to finalized off-chain gameweek scores.
+    pub fn publish_gameweek_result(
+        env: Env,
+        admin: Address,
+        gameweek_id: u64,
+        result_hash: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::authorize_signers(&env, &approvals)?;
+
+        if result_hash.to_array().iter().all(|byte| *byte == 0) {
+            return Err(EscrowError::InvalidGameweekResult);
+        }
+
+        let key = DataKey::GameweekResult(gameweek_id);
+        if let Some(existing) = env.storage().persistent().get::<_, BytesN<32>>(&key) {
+            return if existing == result_hash {
+                Ok(())
+            } else {
+                Err(EscrowError::GameweekResultConflict)
+            };
+        }
+
+        env.storage().persistent().set(&key, &result_hash);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.events().publish(
+            (symbol_short!("gw_result"), gameweek_id),
+            result_hash,
+        );
+        Ok(())
+    }
+
+    pub fn get_gameweek_result_hash(env: Env, gameweek_id: u64) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::GameweekResult(gameweek_id))
     }
 
     /// Admin settles the league, transferring platform fee and winner payouts.
@@ -659,6 +708,22 @@ impl FantasyXIEscrow {
         result.unwrap_or(0)
     }
 
+    /// Returns the total aggregated prize pool balance (in atomic units/USDC) for a specific league.
+    /// Handles non-existent leagues gracefully by returning 0.
+    pub fn get_prize_pool(env: Env, league_id: u64) -> i128 {
+        let key = DataKey::League(league_id);
+        if let Some(league) = env.storage().persistent().get::<_, LeagueState>(&key) {
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            league.total_deposited
+        } else {
+            0
+        }
+    }
+
     /// Winner claims their prize for a settled league.
     pub fn claim_prize(env: Env, winner: Address, league_id: u64) -> Result<(), EscrowError> {
         winner.require_auth();
@@ -926,6 +991,95 @@ mod test {
             },
         ];
         let result = client.try_settle(&admin, &300, &winners, &admin, &0);
+        assert_eq!(result, Err(Ok(EscrowError::AlreadySettled)));
+    }
+
+    #[test]
+    fn test_partial_refund_multi_party_league() {
+        // 4 participants deposit into a league that is later cancelled. The
+        // admin refunds them in two separate batches (mirroring the
+        // backend's batched mass-refund job), and unrefunded participants
+        // must keep their deposit recorded until their own batch runs.
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+        let token_client = token::Client::new(&env, &token_addr);
+
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+        let u3 = Address::generate(&env);
+        let u4 = Address::generate(&env);
+
+        for user in [&u1, &u2, &u3, &u4] {
+            token_admin_client.mint(user, &50_000_000);
+        }
+
+        client.create_league(&admin, &1000, &50_000_000, &token_addr);
+        for user in [&u1, &u2, &u3, &u4] {
+            client.deposit(user, &1000);
+        }
+
+        let league = client.get_league(&1000).unwrap();
+        assert_eq!(league.total_deposited, 200_000_000);
+        assert_eq!(league.participant_count, 4);
+
+        // First batch: refund only u1 and u2.
+        let first_batch = vec![&env, u1.clone(), u2.clone()];
+        client.refund(&admin, &1000, &first_batch);
+
+        assert_eq!(token_client.balance(&u1), 50_000_000);
+        assert_eq!(token_client.balance(&u2), 50_000_000);
+        // Not yet refunded participants keep zero balance and their deposit
+        // record is still readable (a follow-up batch can still find them).
+        assert_eq!(token_client.balance(&u3), 0);
+        assert_eq!(token_client.balance(&u4), 0);
+        assert_eq!(client.get_deposit(&1000, &u3), 50_000_000);
+        assert_eq!(client.get_deposit(&1000, &u4), 50_000_000);
+
+        // The league is already flagged Cancelled after the first partial batch.
+        let mid_state = client.get_league(&1000).unwrap();
+        assert_eq!(mid_state.status, LeagueStatus::Cancelled);
+
+        // Re-running the first batch must be a no-op (deposit already removed).
+        client.refund(&admin, &1000, &first_batch);
+        assert_eq!(token_client.balance(&u1), 50_000_000);
+        assert_eq!(token_client.balance(&u2), 50_000_000);
+
+        // Second batch: refund the remaining participants.
+        let second_batch = vec![&env, u3.clone(), u4.clone()];
+        client.refund(&admin, &1000, &second_batch);
+
+        assert_eq!(token_client.balance(&u3), 50_000_000);
+        assert_eq!(token_client.balance(&u4), 50_000_000);
+        assert_eq!(client.get_deposit(&1000, &u3), 0);
+        assert_eq!(client.get_deposit(&1000, &u4), 0);
+    }
+
+    #[test]
+    fn test_refund_rejected_after_settlement() {
+        // Once a league has been settled, it must never be refundable -
+        // otherwise winners could be paid twice (settlement payouts plus a
+        // stray refund of already-cleared deposits).
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+
+        let user1 = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        token_admin_client.mint(&user1, &50_000_000);
+        client.create_league(&admin, &1001, &50_000_000, &token_addr);
+        client.deposit(&user1, &1001);
+
+        let winners = vec![
+            &env,
+            WinnerPayout {
+                winner: user1.clone(),
+                amount: 47_500_000,
+            },
+        ];
+        client.settle(&admin, &1001, &winners, &treasury, &2_500_000);
+
+        let participants = vec![&env, user1.clone()];
+        let result = client.try_refund(&admin, &1001, &participants);
         assert_eq!(result, Err(Ok(EscrowError::AlreadySettled)));
     }
 
@@ -1282,5 +1436,31 @@ mod test {
         // A doomed upgrade must not disturb existing state
         let league = client.get_league(&811).unwrap();
         assert_eq!(league.participant_count, 0);
+    }
+
+    #[test]
+    fn test_get_prize_pool() {
+        let (env, creator, token, client) = setup_test();
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+
+        let token_admin_client = token::StellarAssetClient::new(&env, &token);
+        token_admin_client.mint(&user1, &100_000_000);
+        token_admin_client.mint(&user2, &100_000_000);
+
+        // 1. Querying non-existent league returns 0 gracefully
+        assert_eq!(client.get_prize_pool(&99999), 0);
+
+        // 2. Newly created league starts with 0 prize pool
+        client.create_league(&creator, &900, &50_000_000, &token);
+        assert_eq!(client.get_prize_pool(&900), 0);
+
+        // 3. First deposit updates total prize pool to 50_000_000 (5 USDC)
+        client.deposit(&user1, &900);
+        assert_eq!(client.get_prize_pool(&900), 50_000_000);
+
+        // 4. Second deposit aggregates to 100_000_000 (10 USDC)
+        client.deposit(&user2, &900);
+        assert_eq!(client.get_prize_pool(&900), 100_000_000);
     }
 }
