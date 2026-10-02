@@ -3,7 +3,8 @@
 import React, { useLayoutEffect, useRef } from "react";
 import { LeagueStandingsEntry, MembershipStatus } from "@/types";
 import { Badge } from "@/components/ui/Badge";
-import { IconCheck, IconAlertCircle, IconChevronUp, IconChevronDown } from "@/components/ui/Icons";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { IconCheck, IconAlertCircle, IconChevronUp, IconChevronDown, IconUsers } from "@/components/ui/Icons";
 
 export interface StandingsTableProps {
   standings: LeagueStandingsEntry[];
@@ -57,9 +58,11 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
 
   if (standings.length === 0) {
     return (
-      <div className="py-12 text-center text-slate-500 text-xs">
-        No managers have registered or submitted scores in this league yet.
-      </div>
+      <EmptyState
+        icon={<IconUsers className="w-6 h-6" />}
+        title="No teams have joined this league yet"
+        description="Be the first to enter your squad and start competing for the prize pool!"
+      />
     );
   }
 
