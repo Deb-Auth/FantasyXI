@@ -7,6 +7,13 @@ import { detectFormation } from "@/lib/formation";
 
 import { useTeamStore } from "@/store/teamStore";
 
+interface PitchProps {
+  isLoading?: boolean;
+}
+
+export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
+  const starters = useTeamStore((state) => 
+    state.players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder)
 export const Pitch: React.FC = () => {
   // Select the raw players array and derive `starters` with useMemo rather than
   // inside the selector: a selector that returns a freshly filtered/sorted array
@@ -79,11 +86,12 @@ export const Pitch: React.FC = () => {
             return (
               <PlayerCard
                 key={`gkp-${idx}`}
-                player={item?.player}
+                player={isLoading ? null : item?.player}
                 positionSlot={Position.GKP}
                 isStarter={true}
                 isCaptain={item?.isCaptain}
                 isViceCaptain={item?.isViceCaptain}
+                isLoading={isLoading}
               />
             );
           })}
@@ -95,11 +103,12 @@ export const Pitch: React.FC = () => {
             return (
               <PlayerCard
                 key={`def-${idx}`}
-                player={item?.player}
+                player={isLoading ? null : item?.player}
                 positionSlot={Position.DEF}
                 isStarter={true}
                 isCaptain={item?.isCaptain}
                 isViceCaptain={item?.isViceCaptain}
+                isLoading={isLoading}
               />
             );
           })}
@@ -111,11 +120,12 @@ export const Pitch: React.FC = () => {
             return (
               <PlayerCard
                 key={`mid-${idx}`}
-                player={item?.player}
+                player={isLoading ? null : item?.player}
                 positionSlot={Position.MID}
                 isStarter={true}
                 isCaptain={item?.isCaptain}
                 isViceCaptain={item?.isViceCaptain}
+                isLoading={isLoading}
               />
             );
           })}
@@ -127,11 +137,12 @@ export const Pitch: React.FC = () => {
             return (
               <PlayerCard
                 key={`fwd-${idx}`}
-                player={item?.player}
+                player={isLoading ? null : item?.player}
                 positionSlot={Position.FWD}
                 isStarter={true}
                 isCaptain={item?.isCaptain}
                 isViceCaptain={item?.isViceCaptain}
+                isLoading={isLoading}
               />
             );
           })}
