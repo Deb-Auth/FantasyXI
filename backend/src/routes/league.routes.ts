@@ -91,6 +91,7 @@ import {
   verifyPayment,
   reconcileDeposit,
   getSettlementPlan,
+  executeSettlement,
   reconcileLeague,
 } from "../controllers/financial.controller.js";
 
@@ -101,6 +102,17 @@ import {
 router.use("/:leagueId/financial", primaryReads, financialRoutes);
 
 // Direct convenience endpoints under /:leagueId
+router.get("/:leagueId/payment-requirement", primaryReads, requireAuth, getPaymentRequirement);
+router.post("/:leagueId/submit-payment", requireAuth, submitPayment);
+router.post("/:leagueId/verify-payment", requireAuth, verifyPayment);
+router.get("/:leagueId/settlement-plan", requireAuth, getSettlementPlan);
+router.post(
+  "/:leagueId/settle",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  executeSettlement
+);
+router.get("/:leagueId/settlement-plan", primaryReads, requireAuth, getSettlementPlan);
 router.get(
   "/:leagueId/payment-requirement",
   primaryReads,
