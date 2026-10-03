@@ -22,7 +22,7 @@ export interface PlayerCardProps {
   onQuickAction?: (action: "captain" | "vice" | "swap" | "transfer") => void;
 }
 
-export const PlayerCard: React.FC<PlayerCardProps> = ({
+const PlayerCardComponent: React.FC<PlayerCardProps> = ({
   player,
   positionSlot,
   isStarter,
@@ -274,3 +274,11 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
     </div>
   );
 };
+
+/**
+ * PlayerCard wrapped in React.memo so the pitch layout avoids re-rendering
+ * cards whose props are unchanged (e.g. during drag operations or unrelated
+ * store updates).
+ */
+export const PlayerCard = React.memo(PlayerCardComponent);
+PlayerCard.displayName = "PlayerCard";
