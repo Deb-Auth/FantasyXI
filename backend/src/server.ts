@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { errorHandler } from "./middleware/error.middleware.js";
 import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
 import { Permission } from "./types/index.js";
 import { ApolloServer } from "@apollo/server";
@@ -94,6 +95,12 @@ app.get(
     });
   }
 );
+
+// ============================================================
+// Global error handler
+// ============================================================
+
+app.use(errorHandler);
 
 // ============================================================
 // Start server

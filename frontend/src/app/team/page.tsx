@@ -46,6 +46,8 @@ export default function TeamPage() {
     squadName, setSquadName, 
     players, setPlayers, 
     selectedPlayerId, setSelectedPlayerId,
+    activeDragPlayer, setActiveDragPlayer,
+    substitutionFeedback, setSubstitutionFeedback,
     activeModalState, setActiveModalState,
     handleSwap, handleSetCaptain, handleSetViceCaptain
   } = useTeamStore();
@@ -188,8 +190,6 @@ export default function TeamPage() {
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
 
   // DND Handlers
-  const [activeDragPlayer, setActiveDragPlayer] = useState<LocalSquadPlayer | null>(null);
-
   const sensors = useSensors(
     useSensor(MouseSensor, {
       activationConstraint: {
@@ -206,9 +206,10 @@ export default function TeamPage() {
 
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
-    const player = players.find((p) => p.playerId === active.id);
+    const player = players.find((p) => String(p.playerId) === String(active.id));
     if (player) {
       setActiveDragPlayer(player);
+      setSubstitutionFeedback(null);
     }
   };
 
@@ -418,7 +419,7 @@ export default function TeamPage() {
     setSelectedPlayerId(null);
   };
 
-  // Save changes to backend
+  // Save changes to backend with optimistic rollback
   const handleSaveSquad = async () => {
     if (!canSave) return;
     if (!isOnline) {
@@ -440,39 +441,59 @@ export default function TeamPage() {
       })),
     };
 
+    // Snapshot current state for rollback
+    const previousPlayers = players.map((p) => ({ ...p, player: p.player ? { ...p.player } : undefined }));
+
     try {
       if (squadId) {
-        // Update existing squad
-        await api.put(`/api/v1/squads/${squadId}`, payload);
-        const msg = "Squad lineup and tactics updated successfully!";
-        setSaveSuccessMsg(msg);
-        toast.success(msg);
+        // Optimistic update: assume success, rollback on failure
+        let rollback = false;
+        try {
+          await api.put(`/api/v1/squads/${squadId}`, payload);
+          const msg = "Squad lineup and tactics updated successfully!";
+          setSaveSuccessMsg(msg);
+          toast.success(msg);
+        } catch (err: unknown) {
+          rollback = true;
+          const msg =
+            err instanceof ApiError
+              ? err.message || "Failed to save squad."
+              : err instanceof Error
+                ? err.message
+                : "An unexpected error occurred while saving squad.";
+          setPlayers(previousPlayers);
+          setErrorMessage(msg);
+          toast.error(msg);
+        }
       } else {
         // Create new squad
         const createPayload = {
           ...payload,
           userId: user?.id,
         };
-        const res = await api.post<{ success: boolean; data: Squad }>(
-          "/api/v1/squads",
-          createPayload
-        );
-        if (res?.data?.id) {
-          setSquadId(res.data.id);
+        try {
+          const res = await api.post<{ success: boolean; data: Squad }>(
+            "/api/v1/squads",
+            createPayload
+          );
+          if (res?.data?.id) {
+            setSquadId(res.data.id);
+          }
+          const msg = "Squad created and registered in FantasyXI!";
+          setSaveSuccessMsg(msg);
+          toast.success(msg);
+        } catch (err: unknown) {
+          const msg =
+            err instanceof ApiError
+              ? err.message || "Failed to create squad."
+              : err instanceof Error
+                ? err.message
+                : "An unexpected error occurred while creating squad.";
+          setPlayers(previousPlayers);
+          setErrorMessage(msg);
+          toast.error(msg);
         }
-        const msg = "Squad created and registered in FantasyXI!";
-        setSaveSuccessMsg(msg);
-        toast.success(msg);
       }
-    } catch (err: unknown) {
-      const msg =
-        err instanceof ApiError
-          ? err.message || "Failed to save squad."
-          : err instanceof Error
-            ? err.message
-            : "An unexpected error occurred while saving squad.";
-      setErrorMessage(msg);
-      toast.error(msg);
     } finally {
       setIsSaving(false);
     }
@@ -532,13 +553,39 @@ export default function TeamPage() {
 
   if (isLoading) {
     return (
-      <div className="py-24 text-center text-slate-400">
-        <div className="inline-block w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-4" />
-        <h2 className="text-base font-bold text-white uppercase tracking-tight">
-          Loading Dugout & Tactical Pitch...
-        </h2>
-        <p className="text-xs text-slate-500 mt-1">Retrieving squad lineup and FPL player telemetry</p>
-      </div>
+      <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        <div className="space-y-6 pb-12">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-pitch-surface border border-pitch-border p-5 rounded-xl shadow-md">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                  Tactical Pitch
+                </span>
+                <span className="text-xs font-mono text-slate-500">&bull; Gameweek Lineup</span>
+              </div>
+              <div className="h-8 w-40 rounded-md bg-slate-800/90 animate-pulse border border-slate-700" />
+            </div>
+            <div className="flex items-center gap-2 text-xs font-mono">
+              <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
+              <span className="h-5 w-14 rounded-md bg-slate-800 border border-slate-700 animate-pulse" />
+            </div>
+          </div>
+
+          <BudgetBar
+            onAutoPick={handleAutoPick}
+            onReset={() => {
+              setPlayers([]);
+              setSelectedPlayerId(null);
+            }}
+            isSaving={isSaving}
+            onSave={handleSaveSquad}
+            canSave={canSave}
+          />
+
+          <Pitch isLoading />
+          <Bench isLoading />
+        </div>
+      </DndContext>
     );
   }
 
@@ -629,6 +676,32 @@ export default function TeamPage() {
           <div data-testid="save-error" className="p-3.5 rounded-lg bg-rose-950/40 border border-rose-500/40 flex items-center gap-3 text-rose-300 text-xs animate-shake">
             <IconAlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
             <span className="font-semibold">{errorMessage}</span>
+          </div>
+        )}
+
+        {substitutionFeedback && (
+          <div
+            className={`p-3.5 rounded-lg flex items-center justify-between gap-3 text-xs animate-fadeIn ${
+              substitutionFeedback.type === "success"
+                ? "bg-emerald-950/50 border border-emerald-500/50 text-emerald-300"
+                : "bg-rose-950/50 border border-rose-500/50 text-rose-300"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {substitutionFeedback.type === "success" ? (
+                <IconCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+              ) : (
+                <IconAlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
+              )}
+              <span className="font-semibold">{substitutionFeedback.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSubstitutionFeedback(null)}
+              className="text-[10px] text-slate-400 hover:text-white uppercase font-mono px-1.5 py-0.5 rounded hover:bg-white/10"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 

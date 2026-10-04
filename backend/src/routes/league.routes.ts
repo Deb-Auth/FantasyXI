@@ -52,6 +52,9 @@ router.get("/:id/members", getLeagueMembers);
 // GET /api/v1/leagues/:id/standings (Public: view league standings)
 router.get("/:id/standings", getLeagueStandings);
 
+// GET /api/v1/leagues/:id/live (Public: stream live standings and matchday events)
+router.get("/:id/live", streamLeagueLive);
+
 // GET /api/v1/leagues/:id/h2h-standings (Public: head-to-head league table)
 router.get("/:id/h2h-standings", getH2HStandings);
 
@@ -95,6 +98,7 @@ import {
   verifyPayment,
   reconcileDeposit,
   getSettlementPlan,
+  executeSettlement,
   reconcileLeague,
 } from "../controllers/financial.controller.js";
 
@@ -105,6 +109,17 @@ import {
 router.use("/:leagueId/financial", primaryReads, financialRoutes);
 
 // Direct convenience endpoints under /:leagueId
+router.get("/:leagueId/payment-requirement", primaryReads, requireAuth, getPaymentRequirement);
+router.post("/:leagueId/submit-payment", requireAuth, submitPayment);
+router.post("/:leagueId/verify-payment", requireAuth, verifyPayment);
+router.get("/:leagueId/settlement-plan", requireAuth, getSettlementPlan);
+router.post(
+  "/:leagueId/settle",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  executeSettlement
+);
+router.get("/:leagueId/settlement-plan", primaryReads, requireAuth, getSettlementPlan);
 router.get(
   "/:leagueId/payment-requirement",
   primaryReads,
@@ -142,4 +157,3 @@ router.get(
 );
 
 export default router;
-
