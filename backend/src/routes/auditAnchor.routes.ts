@@ -1,4 +1,5 @@
 import { Request, Response, Router } from "express";
+import { financialRateLimiter } from "../middleware/rateLimiter.js";
 import {
   createGameweekAuditAnchorService,
   type GameweekAuditAnchorService,
@@ -13,6 +14,8 @@ type ServiceFactory = () => Promise<GameweekAuditAnchorService>;
 
 export function createAuditAnchorRouter(getService: ServiceFactory = createGameweekAuditAnchorService): Router {
   const router = Router();
+  // Public and each verify call reads Horizon, so cap the rate per client.
+  router.use(financialRateLimiter);
 
   router.get("/gameweeks", async (_req: Request, res: Response) => {
     try {

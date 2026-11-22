@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response, Router } from "express";
+import { financialRateLimiter } from "../middleware/rateLimiter.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import {
   createTestnetFaucetService,
@@ -44,6 +45,8 @@ export function createFundStellarAccountHandler(
 const router = Router();
 
 router.use(devOnly);
+// Friendbot and Horizon are called per request, so cap the rate per client.
+router.use(financialRateLimiter);
 router.post("/fund-stellar-account", requireAuth, createFundStellarAccountHandler());
 
 export default router;
