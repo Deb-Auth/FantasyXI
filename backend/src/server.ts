@@ -42,6 +42,7 @@ import {
   createStellarStreamService,
   type StellarStreamService,
 } from "./services/financial/stellarStreamService.js";
+import { createConnectionLeakDetector } from "./services/monitoring/connectionLeakDetector.js";
 
 dotenv.config();
 
@@ -201,8 +202,10 @@ let liveSocketServer: ReturnType<typeof attachLiveSocketServer> | null = null;
 let sorobanEventIngestion: SorobanEventIngestionService | null = null;
 let stellarStream: StellarStreamService | null = null;
 let chatAdapter: Awaited<ReturnType<typeof initRedisChat>> = null;
+const connectionLeakDetector = createConnectionLeakDetector();
 
 async function startServer(): Promise<void> {
+  connectionLeakDetector?.start();
   if (process.env.DATABASE_URL && process.env.PARTITION_ROTATION_ENABLED !== "false") {
     partitionRotationWorker.start();
   }
@@ -299,5 +302,6 @@ process.on("SIGTERM", () => {
     .finally(() => chatAdapter?.close())
     .finally(() => eventFanout.close())
     .finally(() => closeRedisClient())
+    .finally(() => connectionLeakDetector?.stop())
     .finally(() => process.exit(0));
 });
